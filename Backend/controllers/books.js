@@ -18,17 +18,40 @@ exports.createBook = async (req, res, next) => {
     delete bookObject._id;
     delete bookObject._userId;
 
-    //Supprimer d'éventuelles notations envoyées accidentellement
-    delete bookObject.ratings;
-    delete bookObject.averageRating;
+    const notes = bookObject.ratings || []; // Si pas de notes, on met un tableau vide
 
-    //On force les champs à zéro pour démarrer proprement
-    bookObject.ratings = [];
-    bookObject.averageRating = 0;
+    if (notes.length > 0) {
+      // On filtre pour ne garder que les notes valides
+      const validNotes = notes.filter(
+        (note) =>
+          typeof note.grade === 'number' &&
+          note.grade > 0 &&
+          note.grade <= 5 &&
+          typeof note.userId === 'string'
+      );
 
-    // Définir les noms des images optimisées pour la galerie et le détail
+      // Si au moins une note valide, on calcule la moyenne
+      if (validNotes.length > 0) {
+        bookObject.ratings = validNotes;
+
+        const sum = validNotes.reduce((acc, note) => acc + note.grade, 0);
+        const average = sum / validNotes.length;
+
+        bookObject.averageRating = average;
+      } else {
+        // Si aucune note valide
+        bookObject.ratings = [];
+        bookObject.averageRating = 0;
+      }
+    } else {
+      // Si aucune note envoyée
+      bookObject.ratings = [];
+      bookObject.averageRating = 0;
+    }
+
+    // Définir les noms des images optimisées pour le dossier images
     const filename = req.file.filename.split('.')[0];
-    const filenameOptimized = filename + '.webp';
+    const filenameOptimized = `${Date.now()}-${filename}.webp`;
 
     // Définir les chemins de sortie
     const outputPathImage = path.join('images', filenameOptimized);
@@ -37,9 +60,17 @@ exports.createBook = async (req, res, next) => {
     await sharp(req.file.path)
       .resize({ width: 450, height: 580 }) // Ajuste à la taille de la galerie
       .webp({ quality: 80 })
-      .toFile(outputPathImage),
-      // Supprimer l’image originale non compressée
+      .toFile(outputPathImage);
+
+    // Supprimer l’image originale non compressée
+    try {
       fs.unlinkSync(req.file.path);
+    } catch (error) {
+      console.warn(
+        "Erreur lors de la suppression de l'image originale:",
+        error.message
+      );
+    }
 
     const book = new Book({
       ...bookObject,
@@ -62,22 +93,14 @@ exports.createBook = async (req, res, next) => {
 // Logique des modifications
 exports.modifyBook = async (req, res, next) => {
   try {
-    console.log('Données du body:', req.body);
-    console.log('ID du livre à modifier:', req.params.id);
-
     // Recherche du livre par ID
     const book = await Book.findOne({ _id: req.params.id });
     if (!book) {
       return res.status(404).json({ message: 'Livre non trouvé' });
     }
 
-    console.log('Livre trouvé en base de données :', book);
-    console.log('User ID dans le token (auth) :', req.auth.userId);
-    console.log('User ID du livre :', book.userId);
-
     // Vérification que l'utilisateur est bien le propriétaire du livre
     if (book.userId != req.auth.userId) {
-      console.log('IDs ne correspondent pas, accès non autorisé');
       return res.status(403).json({ message: '403: unauthorized request' });
     }
 
@@ -85,41 +108,49 @@ exports.modifyBook = async (req, res, next) => {
 
     if (req.file) {
       // Si une nouvelle image est envoyée, on traite avec Sharp comme dans le POST
-      const filename = req.file.filename.split('.')[0];
-      const filenameOptimized = filename + '.webp';
+      const filenameOptimized = `${book._id}.webp`;
 
       // Définir les chemins de sortie
       const outputPathImage = path.join('images', filenameOptimized);
+
+      // Supprimer l'ancienne image si elle existe
+      if (book.imageUrl) {
+        const oldImage = book.imageUrl.split('/images/')[1];
+        if (oldImage) {
+          fs.unlink(`images/${oldImage}`, (error) => {
+            if (error) {
+              console.warn(
+                "Erreur lors de la suppression de l'ancienne image:",
+                error.message
+              );
+            }
+          });
+        }
+      }
 
       // Utiliser Sharp pour compresser et redimensionner en deux versions
       await sharp(req.file.path)
         .resize({ width: 450, height: 580 }) // Ajuste à la taille de la galerie
         .webp({ quality: 80 })
-        .toFile(outputPathImage),
-        // Supprimer l’image originale non compressée
+        .toFile(outputPathImage);
+      // Supprimer l’image originale non compressée
+      try {
         fs.unlinkSync(req.file.path);
+      } catch (error) {
+        console.warn(
+          "Erreur lors de la suppression de l'image originale:",
+          error.message
+        );
+      }
 
-      const book = new Book({
-        ...bookObject,
-        userId: req.auth.userId,
+      // Mettre à jour l'URL de l'image dans l'objet bookObject
+      const parsedBook = req.body.book ? JSON.parse(req.body.book) : {};
+      bookObject = {
+        ...parsedBook,
         imageUrl: `${req.protocol}://${req.get(
           'host'
         )}/images/${filenameOptimized}`,
-      });
-
-      // Construire l'objet livre avec les nouvelles données + nouvelles URLs d'image
-      if (req.body.book) {
-        bookObject = {
-          ...JSON.parse(req.body.book),
-          imageUrl: `${req.protocol}://${req.get(
-            'host'
-          )}/images/${filenameOptimized}`,
-        };
-      } else {
-        return res.status(400).json({
-          message: 'Corps de la requête invalide (données manquantes)',
-        });
-      }
+      };
     } else {
       // Si pas d'image, on récupère simplement le corps de la requête
       bookObject = req.body;
@@ -167,7 +198,7 @@ exports.deleteBook = (req, res, next) => {
           .json({ message: 'Fichiers image manquants dans les URLs.' });
       }
 
-      // Supprimer les deux images
+      // Supprimer l'image
       fs.unlink(`images/${image}`, (errorImage) => {
         if (errorImage)
           console.warn(
